@@ -78,10 +78,36 @@ def handle_client_connection(client_socket):
     client_socket.send('ACK!')
     client_socket.close()
 
-# class ChannelsStatsType:
-#     def __init__(self, rms=None, clips=None):
-#         self.rms = rms
-#         self.clips = clips
+class ChannelsStatsType:
+    def __init__(self, rms=None, clips=None):
+        if list != type(rms): rms=list()
+        if list != type(clips): clips=list()
+
+        # shadow inputs to class variables
+        self.rms = rms
+        self.clips = clips
+    
+    def clear(self):
+        self.rms, self.clips = [], []
+    
+    def update_with_bufs(self, jackbufs):
+        # make numpy arrays for calculating stats
+        jackarrs = (np.frombuffer(jb, np.dtype('float32')) 
+            for jb in jackbufs)
+
+        self.rms.append( tuple((calcrms(ja) for ja in jackarrs)) )
+        self.clips.append( tuple((countclips(ja) for ja in jackarrs)) )
+
+    def collect_as_dict(self):
+        # print(self.rms)
+        outp = dict(
+            rms  =tuple( np.mean(np.array(self.rms), 0) ),
+            clips=tuple( np.sum(np.array(self.clips), 0) )
+        )
+        self.clear()
+        return outp
+
+
 
 class ClientType:
     def __init__(self, sock, addr, channel=None, pkt=None):
@@ -131,36 +157,16 @@ def calcrms(x):
 def countclips(x):
     return np.sum(abs(x) > 1.0)
 
-def update_channel_stats(channel_stats, jackbufs):
-    if 'rms'   not in channel_stats: channel_stats['rms']   = None
-    if 'clips' not in channel_stats: channel_stats['clips'] = None
 
-    # make numpy arrays for calculating stats
-    jackarrs = (np.frombuffer(jb, np.dtype(float32)) 
-        for jb in jackbufs)
-
-    if any(k not in channel_stats for k in ('rms', 'clips')):
-        channel_stats['rms'] = [(calcrms(ja) for ja in jackarrs)]
-        channel_stats['clips'] = [(countclips(ja) for ja in jackarrs)]
-    else:
-        channel_stats['rms'].append( [(calcrms(ja) for ja in jackarrs)] )
-        channel_stats['clips'].append( [(countclips(ja) for ja in jackarrs)] )
-# end update_channel_stats
-
-def collect_channel_stats(channel_stats):
-    outp = dict(
-        rms  =list( np.mean(np.array(channel_stats['rms']), 0) ),
-        clips=list( np.sum(np.array(channel_stats['clips']), 0) )
-    )
 
 gBufQ = queue.Queue()
 def handle_buffers_and_clients():
-    channel_stats = dict(rms=None, clips=None)
+    channel_stats = ChannelsStatsType()
     last_stats_send_time = time.time()
 
     while True:
         # pull a buffer, this is a blocking call
-        jackbuf = gBufQ.get()
+        jackbufs = gBufQ.get()
 
         # send buffers ASAP
         for client in client_list:
@@ -177,11 +183,11 @@ def handle_buffers_and_clients():
                     # etc...
 
         # update channel statistics with 'rms' and 'clips'
-        update_channel_stats(channel_stats, jackbuf)
+        channel_stats.update_with_bufs(jackbufs)
 
         if time.time() - last_stats_send_time > 1.0:
-            stats_str = json.dumps(collect_channel_stats(channel_stats))
-            channel_stats = dict.fromkeys(channel_stats, None)
+            stats_str = json.dumps(channel_stats.collect_as_dict())
+            channel_stats.clear()
             for client in client_list:
                 try:
                     client.sock.send(
@@ -201,12 +207,12 @@ def handle_buffers_and_clients():
 
         # check if clients sent control information on the sockets
         for client in client_list:
-            ctrl_pkt = client.sock.recv(1024)
-            if ctrl_pkt:
-                ctrl_msg = msgify_pkt(ctrl_pkt, client)
-                if ctrl_msg and 'channel_select' in ctrl_msg:
+            cur_pkt = client.sock.recv(1024)
+            if cur_pkt:
+                (msgtype, cur_msg) = msgify_pkt(client, cur_pkt)
+                if cur_msg and msgtype == 'META' and 'channel_select' in cur_msg:
                     # update channel
-                    client.channel = ctrl_msg['channel_select']
+                    client.channel = cur_msg['channel_select']
 
     # end while True
 # end handle_buffers_and_clients
@@ -228,9 +234,6 @@ bufclient_thread.start()
 
 @client.set_process_callback
 def jack_process(frames):
-    assert len(client.inports) == len(client.outports)
-    assert frames == client.blocksize
-
     # put tuple of channel buffers in to queue
     gBufQ.put( (inport.get_buffer() for inport in client.inports))
 # end jack_process
