@@ -46,15 +46,17 @@ parser.add_argument('-c', '--channels', type=int, default=2,\
         help = "number of channels to serve")
 
 parser.add_argument('-n', '--name', type=str, default='jack_stream_talk', \
-        help = "number of channels to serve")
+        help = "name of jack-client")
 
 parser.add_argument('-p', '--port', type=int, default=4242, \
-        help = "number of channels to serve")
+        help = "port to listen on")
 
-# parser.add_argument('--loglevel', default='WARNING', \
-#         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
+parser.add_argument('--loglevel', default='warning', \
+        choices=['debug', 'info', 'warning', 'error'])
 
 args = parser.parse_args()
+
+logging.root.setLevel(args.loglevel.upper())
 
 clientname = args.name
 servername = None
@@ -78,6 +80,13 @@ def handle_client_connection(client_socket):
     client_socket.send('ACK!')
     client_socket.close()
 
+# help functions for channel buffer stats
+def calcrms(x):
+    return np.sqrt(np.mean(x**2))
+def countclips(x):
+    # print(x)
+    return np.sum(abs(x) > 1.0)
+
 class ChannelsStatsType:
     def __init__(self, rms=None, clips=None):
         if list != type(rms): rms=list()
@@ -92,18 +101,28 @@ class ChannelsStatsType:
     
     def update_with_bufs(self, jackbufs):
         # make numpy arrays for calculating stats
-        jackarrs = (np.frombuffer(jb, np.dtype('float32')) 
+        jackarrs = tuple(np.frombuffer(jb, np.dtype('float32')) 
             for jb in jackbufs)
 
         self.rms.append( tuple((calcrms(ja) for ja in jackarrs)) )
         self.clips.append( tuple((countclips(ja) for ja in jackarrs)) )
 
+
     def collect_as_dict(self):
-        # print(self.rms)
-        outp = dict(
-            rms  =tuple( np.mean(np.array(self.rms), 0) ),
-            clips=tuple( np.sum(np.array(self.clips), 0) )
-        )
+        logging.debug('rms = {}'.format(self.rms))
+        logging.debug('clips = {}'.format(self.clips))
+
+        if len(self.rms) <= 0 or len(self.clips) <= 0:
+            outp = dict(
+                rms  =(nan,)*channels,
+                clips=(nan,)*channels
+            )
+        else:
+            outp = dict(
+                rms  =np.mean(np.array(self.rms), 0).tolist(),
+                clips=np.sum(np.array(self.clips), 0).tolist()
+            )
+
         self.clear()
         return outp
 
@@ -125,6 +144,8 @@ client_list = []
 def handle_incoming_connections():
     bind_ip = '0.0.0.0'
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
     server.bind((bind_ip, port))
     server.listen()
     print('Waiting for connections on {}:{}'.format(bind_ip, port))
@@ -148,14 +169,6 @@ incoming_thread = threading.Thread(target=handle_incoming_connections)
 incoming_thread.start()
 
 
-# help functions for channel buffer stats
-
-
-def calcrms(x):
-    return np.sqrt(np.mean(x**2))
-
-def countclips(x):
-    return np.sum(abs(x) > 1.0)
 
 
 
@@ -186,8 +199,15 @@ def handle_buffers_and_clients():
         channel_stats.update_with_bufs(jackbufs)
 
         if time.time() - last_stats_send_time > 1.0:
-            stats_str = json.dumps(channel_stats.collect_as_dict())
-            channel_stats.clear()
+            last_stats_send_time = time.time()
+            stats_dict = channel_stats.collect_as_dict()
+            # print(stats_tmp)
+            # stats_str = json.dumps(channel_stats.collect_as_dict())
+
+            print(stats_dict)
+            stats_str = json.dumps(stats_dict)
+            
+            # channel_stats.clear()
             for client in client_list:
                 try:
                     client.sock.send(
