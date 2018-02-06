@@ -152,6 +152,15 @@ def handle_incoming_connections():
 
     while True:
         (client_sock, client_addr) = server.accept()
+
+        print('FYI, connected client_addr is {}'.format(client_addr))
+
+        # if we connect back to ourself, then break while loop
+        if client_addr[0] in ('localhost', '127.0.0.1'):
+            client_sock.close() # close the socket just used for signalling
+            server.close() # close incoming listener socket
+            break
+
         print('Accepted connection from {}:{}'.format(
             client_addr[0], client_addr[1]))
 
@@ -169,9 +178,6 @@ incoming_thread = threading.Thread(target=handle_incoming_connections)
 incoming_thread.start()
 
 
-
-
-
 gBufQ = queue.Queue()
 def handle_buffers_and_clients():
     channel_stats = ChannelsStatsType()
@@ -180,6 +186,9 @@ def handle_buffers_and_clients():
     while True:
         # pull a buffer, this is a blocking call
         jackbufs = gBufQ.get()
+
+        if jackbufs is None:
+            break # end the thread
 
         # send buffers ASAP
         for client in client_list:
@@ -235,29 +244,21 @@ def handle_buffers_and_clients():
                     client.channel = cur_msg['channel_select']
 
     # end while True
+
+    # close all the client sockets before ending thread
+    for client in client_list:
+        client.sock.close()
+
 # end handle_buffers_and_clients
 bufclient_thread = threading.Thread(target=handle_buffers_and_clients)
 bufclient_thread.start()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 @client.set_process_callback
 def jack_process(frames):
     # put tuple of channel buffers in to queue
-    gBufQ.put( (inport.get_buffer() for inport in client.inports))
+    gBufQ.put( (inport.get_buffer() for inport in client.inports) )
 # end jack_process
-
 
 
 @client.set_shutdown_callback
@@ -265,14 +266,26 @@ def jack_shutdown(status, reason):
     print('JACK shutdown!')
     print('status:', status)
     print('reason:', reason)
+    clean_up_threads_etc()
     event.set()
-
-
 
 
 # create input ports
 for chidx in range(channels):
     client.inports.register('input_{:02d}'.format(chidx))
+
+
+def clean_up_threads():
+    # signal incoming_thread AND bufclient_thread to end
+    tmpsock = socket.socket().connect(('localhost', port))
+    gBufQ.put(None) # signal buf handler thread to end
+
+    # wait for those threads to finish
+    print('waiting for network and buffer threads to cleanly exit')
+    incoming_thread.join()
+    bufclient_thread.join()
+    print('network and buffer threads cleanly exited')
+
 
 with client:
     # When entering this with-statement, client.activate() is called.
@@ -304,6 +317,8 @@ with client:
         event.wait()
     except KeyboardInterrupt:
         print('\nInterrupted by user')
+
+    clean_up_threads()
 
 # When the above with-statement is left (either because the end of the
 # code block is reached, or because an exception was raised inside),
