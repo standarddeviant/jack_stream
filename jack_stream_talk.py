@@ -40,6 +40,7 @@ else:
     pass
 
 
+ # create arg parser
 parser = argparse.ArgumentParser(description='Process args for jack_stream_talk.py')
 
 parser.add_argument('-c', '--channels', type=int, default=2,\
@@ -51,40 +52,34 @@ parser.add_argument('-n', '--name', type=str, default='jack_stream_talk', \
 parser.add_argument('-p', '--port', type=int, default=4242, \
         help = "port to listen on")
 
-parser.add_argument('--loglevel', default='warning', \
+parser.add_argument('--loglevel', default='info', \
         choices=['debug', 'info', 'warning', 'error'])
 
+# parse args
 args = parser.parse_args()
 
+# init things and set settings according to args
 logging.root.setLevel(args.loglevel.upper())
-
 clientname = args.name
 servername = None
 channels = args.channels
 port = args.port
-
 client = jack.Client(clientname, servername=servername)
 
+# check jack server status and possible client renaming
 if client.status.server_started:
-    print('JACK server started')
+    logging.info('JACK server started')
 if client.status.name_not_unique:
-    print('unique name {0!r} assigned'.format(client.name))
+    logging.warning('unique name {0!r} assigned'.format(client.name))
 
 # this is to support python2 - should we even bother?
 event = threading.Event()
 
 
-def handle_client_connection(client_socket):
-    request = client_socket.recv(1024)
-    print('Received {}'.format(request))
-    client_socket.send('ACK!')
-    client_socket.close()
-
-# help functions for channel buffer stats
+# helper functions for channel buffer stats
 def calcrms(x):
     return np.sqrt(np.mean(x**2))
 def countclips(x):
-    # print(x)
     return np.sum(abs(x) > 1.0)
 
 class ChannelsStatsType:
@@ -107,7 +102,6 @@ class ChannelsStatsType:
         self.rms.append( tuple((calcrms(ja) for ja in jackarrs)) )
         self.clips.append( tuple((countclips(ja) for ja in jackarrs)) )
 
-
     def collect_as_dict(self):
         logging.debug('rms = {}'.format(self.rms))
         logging.debug('clips = {}'.format(self.clips))
@@ -125,7 +119,7 @@ class ChannelsStatsType:
 
         self.clear()
         return outp
-
+# end ChannelsStatsType
 
 
 class ClientType:
@@ -138,8 +132,13 @@ class ClientType:
         self.addr    = addr
         self.channel = channel
         self.pkt     = pkt
+# end ClientsType
 
+
+# list of clients to be appended by handle_incoming_threads
+# this list will be looped over/serviced by handle_buffers_and_clients
 client_list = []
+
 
 def handle_incoming_connections():
     bind_ip = '0.0.0.0'
@@ -148,12 +147,14 @@ def handle_incoming_connections():
 
     server.bind((bind_ip, port))
     server.listen()
-    print('Waiting for connections on {}:{}'.format(bind_ip, port))
+    logging.info('Waiting for connections on {}:{}'.format(bind_ip, port))
 
     while True:
         (client_sock, client_addr) = server.accept()
 
-        print('FYI, connected client_addr is {}'.format(client_addr))
+        logging.info('connected client_addr is {}'.format(client_addr))
+        logging.info('client_list ='.format(
+            ''.join('\n    {}'.format(c.addr[0]) for c in client_list)))
 
         # if we connect back to ourself, then break while loop
         if client_addr[0] in ('localhost', '127.0.0.1'):
@@ -161,7 +162,7 @@ def handle_incoming_connections():
             server.close() # close incoming listener socket
             break
 
-        print('Accepted connection from {}:{}'.format(
+        logging.info('Accepted connection from {}:{}'.format(
             client_addr[0], client_addr[1]))
 
         # set client to blocking
@@ -172,6 +173,7 @@ def handle_incoming_connections():
             ClientType(client_sock, client_addr, 1, bytearray())
         )
 #end handle_incoming_connections
+
 
 # start thread for handle_incoming_connections
 incoming_thread = threading.Thread(target=handle_incoming_connections)
@@ -210,13 +212,10 @@ def handle_buffers_and_clients():
         if time.time() - last_stats_send_time > 1.0:
             last_stats_send_time = time.time()
             stats_dict = channel_stats.collect_as_dict()
-            # print(stats_tmp)
-            # stats_str = json.dumps(channel_stats.collect_as_dict())
 
-            print(stats_dict)
+            logging.debug(stats_dict)
             stats_str = json.dumps(stats_dict)
             
-            # channel_stats.clear()
             for client in client_list:
                 try:
                     client.sock.send(
@@ -248,6 +247,8 @@ def handle_buffers_and_clients():
     # close all the client sockets before ending thread
     for client in client_list:
         client.sock.close()
+# end def handle_buffers_and_clients
+
 
 # end handle_buffers_and_clients
 bufclient_thread = threading.Thread(target=handle_buffers_and_clients)
@@ -264,8 +265,8 @@ def jack_process(frames):
 @client.set_shutdown_callback
 def jack_shutdown(status, reason):
     print('JACK shutdown!')
-    print('status:', status)
-    print('reason:', reason)
+    print('    status:', status)
+    print('    reason:', reason)
     clean_up_threads_etc()
     event.set()
 
@@ -281,44 +282,21 @@ def clean_up_threads():
     gBufQ.put(None) # signal buf handler thread to end
 
     # wait for those threads to finish
-    print('waiting for network and buffer threads to cleanly exit')
+    logging.debug('waiting for network and buffer threads to cleanly exit')
     incoming_thread.join()
     bufclient_thread.join()
-    print('network and buffer threads cleanly exited')
+    logging.info('network and buffer threads cleanly exited')
 
 
 with client:
-    # When entering this with-statement, client.activate() is called.
-    # This tells the JACK server that we are ready to roll.
-    # Our process() callback will start running now.
-
-    # Connect the ports.  You can't do this before the client is activated,
-    # because we can't make connections to clients that aren't running.
-    # Note the confusing (but necessary) orientation of the driver backend
-    # ports: playback ports are "input" to the backend, and capture ports
-    # are "output" from it.
-
-    # capture = client.get_ports(is_physical=True, is_output=True)
-    # if not capture:
-    #     raise RuntimeError('No physical capture ports')
-
-    # for src, dest in zip(capture, client.inports):
-    #     client.connect(src, dest)
-
-    # playback = client.get_ports(is_physical=True, is_input=True)
-    # if not playback:
-    #     raise RuntimeError('No physical playback ports')
-
-    # for src, dest in zip(client.outports, playback):
-    #     client.connect(src, dest)
-
-    print('Press Ctrl+C to stop')
+    logging.info('Press Ctrl+C to stop')
     try:
         event.wait()
     except KeyboardInterrupt:
-        print('\nInterrupted by user')
+        logging.warning('Interrupted by user')
 
     clean_up_threads()
+
 
 # When the above with-statement is left (either because the end of the
 # code block is reached, or because an exception was raised inside),
