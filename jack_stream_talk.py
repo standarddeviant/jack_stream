@@ -27,7 +27,7 @@ import numpy as np
 import queue # non-standard import???
 import jack
 
-from jack_stream_utils import msgify_pkt
+from jack_stream_utils import msgify_pkt, get_ip
 
 if sys.version_info < (3, 0):
     # In Python 2.x, event.wait() cannot be interrupted with Ctrl+C.
@@ -147,7 +147,9 @@ def handle_incoming_connections():
 
     server.bind((bind_ip, port))
     server.listen()
-    logging.info('Waiting for connections on {}:{}'.format(bind_ip, port))
+
+    print('\nWaiting for connections on {} : {}'.format(
+        get_ip(), port))
 
     while True:
         (client_sock, client_addr) = server.accept()
@@ -289,7 +291,7 @@ def clean_up_threads():
 
 
 with client:
-    logging.info('Press Ctrl+C to stop')
+    print('\nPress Ctrl+C to stop\n')
     try:
         event.wait()
     except KeyboardInterrupt:
