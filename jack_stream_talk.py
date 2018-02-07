@@ -27,7 +27,7 @@ import numpy as np
 import queue # non-standard import???
 import jack
 
-from jack_stream_utils import msgify_pkt, get_ip
+from jack_stream_common import msgify_pkt, get_ip
 
 if sys.version_info < (3, 0):
     # In Python 2.x, event.wait() cannot be interrupted with Ctrl+C.
@@ -123,7 +123,7 @@ class ChannelsStatsType:
 
 
 class ClientType:
-    def __init__(self, sock, addr, channel=None, pkt=None):
+    def __init__(self, sock, addr, channel=None, prevpkt=None):
         if channel == None: channel = 1
         if pkt     == None: pkt     = bytearray()
         
@@ -131,7 +131,7 @@ class ClientType:
         self.sock    = sock
         self.addr    = addr
         self.channel = channel
-        self.pkt     = pkt
+        self.prevpkt = prevpkt
 # end ClientsType
 
 
