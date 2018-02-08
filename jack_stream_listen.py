@@ -46,7 +46,8 @@ class JackStreamListen(QMainWindow):
         self.ip = '127.0.0.1'
         self.port = '23'
         self.state = 'disconnected'
-        self.channels = 1
+        self.channel_select = -1
+        self.channel_count = -1
         # self.tsfmt = '%y%m%d-%H%M%S:'
         # self.textFgColor = 'rgb(0,0,0)'
         # self.textBgColor = 'rgb(255,255,255)'
@@ -62,6 +63,7 @@ class JackStreamListen(QMainWindow):
         
         self.prevpkt = bytearray() # note a QByteArray b/c reusing msgify_pkt
         self.audiodata = bytearray()
+        self.clips = []
         
         #FIXME self.tcpSocket.error.connect(self.displayError)
 
@@ -73,24 +75,15 @@ class JackStreamListen(QMainWindow):
         # self.destroyed is inherited from QMainWindow
         self.destroyed.connect(self.exitApplication)
 
-        # self.textBox = QTextEdit();self.textBox.setReadOnly(1);
-        # self.textBox.setStyleSheet('QTextEdit{color: '+self.textFgColor+'; background: '+self.textBgColor+';}');
-        # self.inputLine = QLineEdit(self)
-        # self.textBox.setFont(self.font)
-        # self.inputLine.setFont(self.font)
-        # self.inputLine.setStyleSheet('QLineEdit{background: gray;}');
-        # self.inputLine.setReadOnly(1)
-        # self.inputLine.returnPressed.connect(self.sendInputToTcp);
-
+        # make colored status label at the bottom
         self.statusLabel = QLabel('STATUS: Disconnected')
         self.statusLabel.setStyleSheet('QLabel {color: white; background: red}')
 
-
-        self.chanButtons = []
-        
-        # self.setLayout ( grid )
-
-        # self.setCentralWidget(self.textBox)
+        # create layout/widgets for channels stats to be updated later
+        self.channelsLayout = QGridLayout()
+        self.channelsWidgets = []
+        self.channelsContainer = QWidget()
+        self.setCentralWidget(self.channelsContainer)
 
         self.connectAction = QAction('Connect', self);self.connectAction.setShortcut('Ctrl+X')
         self.connectAction.triggered.connect(self.invokeConnectDialog);
@@ -129,56 +122,41 @@ class JackStreamListen(QMainWindow):
     def invokeConnectDialog(self):
         if( self.state == 'disconnected' ):
             connectDialog = ConnectDialog(self)
-            connectDialog.show();
+            connectDialog.show()
 
     def invokeOptionsDialog(self):
         optionsDialog = OptionsDialog(self)
-        optionsDialog.show();
-
-    # def insertFile(self):
-    #     if( self.state == 'connected' ):
-    #         fileName = QtGui.QFileDialog.getOpenFileName(self,'Open File', self.insDir, "All Files (*.*)")
-    #         self.insFile = fileName[0];
-    #         self.insDir = os.path.dirname(self.insFile)
-    #         runnable = InsertFileRunnable(self)
-    #         QtCore.QThreadPool.globalInstance().start(runnable)
+        optionsDialog.show()
 
     def sockHandleConnect(self,ip,port):
         self.ip=ip ; self.port=port
         self.qsock.connectToHost(ip,int(port))
         self.state = 'connected'
-        # self.inputLine.setStyleSheet('QLineEdit{color: '+self.textFgColor+'; background: '+self.textBgColor+';}')
-        # self.inputLine.setReadOnly(0)
-        # self.inputLine.setFocus()
+        logging.debug('state = '+self.state+': '+self.ip+':'+self.port)
+
         self.connectAction.setEnabled(0)
         self.disconnectAction.setEnabled(1)
-
         self.statusLabel.setText('STATUS: Connected')
         self.statusLabel.setStyleSheet('QLabel {color: white; background: green}')
 
-        # self.insertAction.setEnabled(1)
-        #self.spawnSocketThreads()
-
-        logging.debug('state = '+self.state+': '+self.ip+':'+self.port)
 
     def disconnect(self):
         if( self.state == 'connected' ):
-            self.state = 'disconnected'
             self.qsock.disconnectFromHost()
-            # self.inputLine.setStyleSheet("QLineEdit{background: gray;}");
-            # self.inputLine.setReadOnly(1)
-            # self.textBox.setFocus()
+            self.state = 'disconnected'
+            logging.debug('state = '+self.state+'\n')
+
             self.connectAction.setEnabled(1)
             self.disconnectAction.setEnabled(0)
-
             self.statusLabel.setText('STATUS: Disconnected')
             self.statusLabel.setStyleSheet('QLabel {color: white; background: red}')
 
-            # self.insertAction.setEnabled(0)
-            logging.debug('state = '+self.state+'\n')
+            self.channel_count = -1
+            self.channel_select = -1
+
 
     @PyQtSlot()
-    def sendInputToTcp(self):
+    def sendMetaToTcp(self):
         if( self.state == 'connected' ):
             outstr = self.inputLine.text()+'\r\n'
             dbg = self.qsock.write(QtCore.QByteArray(outstr))
@@ -231,7 +209,20 @@ class JackStreamListen(QMainWindow):
 
         if msgtype == 'META' and len(msg) > 0:
             jsd = json.loads(msg)
-            self.updateChannelStats(jsd)
+            self.updateChannelsStats(jsd)
+
+    def updateChannelsStats(self, jsd):
+        if 'rms' in jsd and 'clips' in jsd:
+            assert len(jsd['rms']) == len(jsd['clips'])
+            if
+            
+        self.channelsWidgets.append
+        self.channelsLayout = QGridLayout()
+
+        self.channelsContainer = QWidget()
+        self.setCentralWidget(self.channelsContainer)
+
+        pass
 
     #Redefining QtGui.MainWindow method in order to cleanly destroy socket 
     #connection when the user clicks the 'X' button at the top of the window
