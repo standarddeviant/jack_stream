@@ -8,7 +8,8 @@ author: Dave Crist
 last edited: February 2018
 """
 
-import sys,os,time
+import os, sys, json, time, logging
+from os.path import join, expanduser
 
 try: # python 3 std imports
     import configparser
@@ -16,7 +17,7 @@ except:
     try: # python 2 std imports
         import ConfigParser as configparser
     except:
-        pass # FIXME, print helpful error message...
+        raise ImportError("unable to import standard package configparser or ConfigParser")
 
 try:
     from PyQt5 import QtCore, QtGui, QtNetwork
@@ -35,13 +36,13 @@ except:
         pass # fixme, try to use PySide and THEN print helpful error message...
 
 
-from jack_stream_common import *
+from jack_stream_common import msgify_pkt, JACK_STREAM_VERSION
 
 
-class JackStreamListenClient(QMainWindow):
+class JackStreamListen(QMainWindow):
     checkInQueueSignal = PyQtSignal()
     def __init__(self):
-        super(Qnet, self).__init__()
+        super(JackStreamListen, self).__init__()
         self.ip = '127.0.0.1'
         self.port = '23'
         self.state = 'disconnected'
@@ -58,7 +59,9 @@ class JackStreamListenClient(QMainWindow):
 
         self.qsock = QtNetwork.QTcpSocket(self)
         self.qsock.readyRead.connect(self.onReadyRead)
+        
         self.prevpkt = bytearray() # note a QByteArray b/c reusing msgify_pkt
+        self.audiodata = bytearray()
         
         #FIXME self.tcpSocket.error.connect(self.displayError)
 
@@ -72,26 +75,29 @@ class JackStreamListenClient(QMainWindow):
 
         # self.textBox = QTextEdit();self.textBox.setReadOnly(1);
         # self.textBox.setStyleSheet('QTextEdit{color: '+self.textFgColor+'; background: '+self.textBgColor+';}');
-
-        self.inputLine = HistoricalLineEdit(self);#QtGui.QLineEdit();
-        self.textBox.setFont(self.font)
-        self.inputLine.setFont(self.font)
-
-        self.inputLine.setStyleSheet('QLineEdit{background: gray;}');
-        self.inputLine.setReadOnly(1)
+        # self.inputLine = QLineEdit(self)
+        # self.textBox.setFont(self.font)
+        # self.inputLine.setFont(self.font)
+        # self.inputLine.setStyleSheet('QLineEdit{background: gray;}');
+        # self.inputLine.setReadOnly(1)
         # self.inputLine.returnPressed.connect(self.sendInputToTcp);
 
-        self.chanButtons = []
-        self.setLayout ( grid )
+        self.statusLabel = QLabel('STATUS: Disconnected')
+        self.statusLabel.setStyleSheet('QLabel {color: white; background: red}')
 
-        self.setCentralWidget(self.textBox)
+
+        self.chanButtons = []
+        
+        # self.setLayout ( grid )
+
+        # self.setCentralWidget(self.textBox)
 
         self.connectAction = QAction('Connect', self);self.connectAction.setShortcut('Ctrl+X')
         self.connectAction.triggered.connect(self.invokeConnectDialog);
         self.disconnectAction = QAction('Disonnect', self);self.disconnectAction.setShortcut('Ctrl+D')
         self.disconnectAction.triggered.connect(self.disconnect);self.disconnectAction.setEnabled(0)
-        self.insertAction = QAction('Insert File', self);self.insertAction.setShortcut('Ctrl+I')
-        self.insertAction.triggered.connect(self.insertFile);self.insertAction.setEnabled(0)
+        # self.insertAction = QAction('Insert File', self);self.insertAction.setShortcut('Ctrl+I')
+        # self.insertAction.triggered.connect(self.insertFile);self.insertAction.setEnabled(0)
         self.exitAction = QAction('Exit', self);self.exitAction.setShortcut('Ctrl+Q')
         self.exitAction.triggered.connect(self.exitApplication)
         self.optionsAction = QAction('Options', self);self.optionsAction.setShortcut('Ctrl+O')
@@ -105,7 +111,7 @@ class JackStreamListenClient(QMainWindow):
         mainbar.setMovable(0)
         mainbar.addAction(self.connectAction)
         mainbar.addAction(self.disconnectAction)
-        mainbar.addAction(self.insertAction)
+        # mainbar.addAction(self.insertAction)
         mainbar.addAction(self.optionsAction)
 
         #adding to window so the key shortcut works, but it's not displayed in the menu
@@ -114,10 +120,10 @@ class JackStreamListenClient(QMainWindow):
         inputbar = QToolBar('Input');inputbar.setParent(self)
         self.addToolBar(QtCore.Qt.BottomToolBarArea,inputbar)
         inputbar.setMovable(0)
-        inputbar.addWidget(self.inputLine)
+        inputbar.addWidget(self.statusLabel)
 
         self.setGeometry(300, 300, 350, 250)
-        self.setWindowTitle('qnet v'+VER)    
+        self.setWindowTitle('jack_stream_listen v'+JACK_STREAM_VERSION)    
         self.show()
 
     def invokeConnectDialog(self):
@@ -140,28 +146,36 @@ class JackStreamListenClient(QMainWindow):
     def sockHandleConnect(self,ip,port):
         self.ip=ip ; self.port=port
         self.qsock.connectToHost(ip,int(port))
-        self.state = 'connected'; logging.debug'state = '+self.state+': '+self.ip+':'+self.port)
-        self.inputLine.setStyleSheet('QLineEdit{color: '+self.textFgColor+'; background: '+self.textBgColor+';}');
-        self.inputLine.setReadOnly(0)
-        self.inputLine.setFocus()
+        self.state = 'connected'
+        # self.inputLine.setStyleSheet('QLineEdit{color: '+self.textFgColor+'; background: '+self.textBgColor+';}')
+        # self.inputLine.setReadOnly(0)
+        # self.inputLine.setFocus()
         self.connectAction.setEnabled(0)
         self.disconnectAction.setEnabled(1)
-        self.insertAction.setEnabled(1)
+
+        self.statusLabel.setText('STATUS: Connected')
+        self.statusLabel.setStyleSheet('QLabel {color: white; background: green}')
+
+        # self.insertAction.setEnabled(1)
         #self.spawnSocketThreads()
+
+        logging.debug('state = '+self.state+': '+self.ip+':'+self.port)
 
     def disconnect(self):
         if( self.state == 'connected' ):
             self.state = 'disconnected'
-            #self.sock.shutdown(socket.SHUT_RDWR)
-            #self.sock.close()
             self.qsock.disconnectFromHost()
-            self.inputLine.setStyleSheet("QLineEdit{background: gray;}");
-            self.inputLine.setReadOnly(1)
-            self.textBox.setFocus()
+            # self.inputLine.setStyleSheet("QLineEdit{background: gray;}");
+            # self.inputLine.setReadOnly(1)
+            # self.textBox.setFocus()
             self.connectAction.setEnabled(1)
             self.disconnectAction.setEnabled(0)
-            self.insertAction.setEnabled(0)
-            print('DBG: state = '+self.state+'\n')
+
+            self.statusLabel.setText('STATUS: Disconnected')
+            self.statusLabel.setStyleSheet('QLabel {color: white; background: red}')
+
+            # self.insertAction.setEnabled(0)
+            logging.debug('state = '+self.state+'\n')
 
     @PyQtSlot()
     def sendInputToTcp(self):
@@ -172,8 +186,6 @@ class JackStreamListenClient(QMainWindow):
 
     def exitApplication(self):
         if( self.state == 'connected' ):
-            #self.sock.shutdown(socket.SHUT_RDWR)
-            #self.sock.close()
             self.qsock.disconnectFromHost()
             self.state = 'disconnected'
         self.saveSettings()
@@ -182,24 +194,19 @@ class JackStreamListenClient(QMainWindow):
     def saveSettings(self):
         cfgParser = configparser.RawConfigParser()
         cfgParser.add_section('Generic')
-        cfgParser.set('Generic','ip',self.ip)
-        cfgParser.set('Generic','port',self.port)
-        cfgParser.set('Generic','tsfmt',self.tsfmt)
-        cfgParser.set('Generic','font',self.fontstr)
-        cfgParser.set('Generic','textfg',self.textFgColor)
-        cfgParser.set('Generic','textbg',self.textBgColor)
+        cfgParser.set('Generic','ip', self.ip)
+        cfgParser.set('Generic','port', self.port)
+        # cfgParser.set('Generic','tsfmt',self.tsfmt)
+        # cfgParser.set('Generic','font',self.fontstr)
+        # cfgParser.set('Generic','textfg',self.textFgColor)
+        # cfgParser.set('Generic','textbg',self.textBgColor)
 
-        cfgParser.add_section('InsertFile')
-        cfgParser.set('InsertFile','insFile',self.insFile)
-        cfgParser.set('InsertFile','insDir',self.insDir)
-        cfgParser.set('InsertFile','insSleepAmount',self.insSleepAmount)
-
-        with open( os.path.expanduser('~/qnet.cfg'),'w') as cfgfile:
+        with open(join(expanduser('~'), 'jack_stream_listen.cfg'), 'w') as cfgfile:
             cfgParser.write(cfgfile)
 
     def loadSettings(self):
-        cfgParser = configparser.rser.RawConfigParser()
-        cfgParser.read(os.path.expanduser('~/qnet.cfg'))
+        cfgParser = configparser.RawConfigParser()
+        cfgParser.read(join(expanduser('~'), 'jack_stream_listen.cfg'))
         if( cfgParser.has_section('Generic') ):
             self.ip = cfgParser.get('Generic','ip')
             self.port = cfgParser.get('Generic','port')
@@ -220,9 +227,9 @@ class JackStreamListenClient(QMainWindow):
         # tstr = time.strftime(self.tsfmt)
         curpkt = bytearray(self.qsock.readAll())
         logging.debug('DBG: Rcvd: '+curpkt.decode())
-        msgtype, msg = msgify_pkt(self, curpkt)
+        msgtype, msg = msgify_pkt(self.prevpkt, curpkt)
 
-        if msgtype == 'META':
+        if msgtype == 'META' and len(msg) > 0:
             jsd = json.loads(msg)
             self.updateChannelStats(jsd)
 
@@ -258,62 +265,66 @@ class ConnectDialog(QDialog):
         self.accept()
 #END class ConnectDialog(QtGui.QDialog)
 
-# class OptionsDialog(QDialog):
-#     def __init__(self, parent):
-#         super(OptionsDialog, self).__init__(parent)
-#         self.parent = parent
-#         # Create widgets
-#         self.insSleepAmount = QLineEdit(str(parent.insSleepAmount))
-#         self.tsfmt = QLineEdit(parent.tsfmt)
-#         self.fontButton = QPushButton('Set Font')
-#         self.fontButton.clicked.connect(self.setFont)
+class OptionsDialog(QDialog):
+    def __init__(self, parent):
+        super(OptionsDialog, self).__init__(parent)
+        self.parent = parent
 
-#         self.textFgButton = QPushButton('Set Text Foreground Color')
-#         self.textFgButton.clicked.connect(self.setFg)
+        # Create widgets
+        # self.fontButton = QPushButton('Set Font')
+        # self.fontButton.clicked.connect(self.setFont)
 
-#         self.textBgButton = QPushButton('Set Text Background Color')
-#         self.textBgButton.clicked.connect(self.setBg)
+        # self.textFgButton = QPushButton('Set Text Foreground Color')
+        # self.textFgButton.clicked.connect(self.setFg)
 
-#         self.saveButton = QPushButton('Save and Close')
-#         self.saveButton.clicked.connect(self.saveSettings)
-#         # Create layout and add widgets
-#         self.layout = QFormLayout()
-#         self.layout.addRow('Insert Sleep Amount (Sec)',self.insSleepAmount);
-#         self.layout.addRow('Time (%y%m%d-%H%M%S:)',self.tsfmt);
-#         self.layout.addRow(self.fontButton)
-#         self.layout.addRow(self.textFgButton)
-#         self.layout.addRow(self.textBgButton)
-#         self.layout.addRow(self.saveButton)
+        self.textBgButton = QPushButton('Set Text Background Color')
+        self.textBgButton.clicked.connect(self.setBg)
 
-#         # Set dialog layout
-#         self.setLayout(self.layout)
-#         self.setWindowTitle('Connection Dialog')    
-#     def setFont(self):
-#         (font,ok) = QFontDialog.getFont(self.parent.inputLine.font())
-#         if( ok ):
-#             self.parent.fontstr = font.toString()
-#             self.parent.inputLine.setFont(font)
-#             self.parent.textBox.setFont(font)
-#     def setFg(self):
-#         c = QColorDialog.getColor()
-#         self.parent.textFgColor = 'rgb('+str(c.red())+','+str(c.green())+','+str(c.blue())+')'
-#         self.parent.textBox.setStyleSheet('QTextEdit{color: '+self.parent.textFgColor+'; background: '+self.parent.textBgColor+';}');
-#         if( 'connected' == self.parent.state ):
-#             self.parent.inputLine.setStyleSheet('QLineEdit{color: '+self.parent.textFgColor+'; background: '+self.parent.textBgColor+';}');
-#     def setBg(self):
-#         c = QColorDialog.getColor()
-#         self.parent.textBgColor = 'rgb('+str(c.red())+','+str(c.green())+','+str(c.blue())+')'
-#         self.parent.textBox.setStyleSheet('QTextEdit{color: '+self.parent.textFgColor+'; background: '+self.parent.textBgColor+';}');
-#         if( 'connected' == self.parent.state ):
-#             self.parent.inputLine.setStyleSheet('QLineEdit{color: '+self.parent.textFgColor+'; background: '+self.parent.textBgColor+';}');
-#     # connects socket
-#     def saveSettings(self):
-#         self.parent.insSleepAmount = float(self.insSleepAmount.text())
-#         self.parent.tsfmt = self.tsfmt.text()
-#         self.parent.font = self.font
-#         self.parent.saveSettings()
-#         self.accept()
-# #END class OptionsDialog(QtGui.QDialog)
+        self.saveButton = QPushButton('Save and Close')
+        self.saveButton.clicked.connect(self.saveSettings)
+        
+        # Create layout and add widgets
+        self.layout = QFormLayout()
+        # self.layout.addRow('Insert Sleep Amount (Sec)',self.insSleepAmount);
+        # self.layout.addRow('Time (%y%m%d-%H%M%S:)',self.tsfmt);
+        
+        # self.layout.addRow(self.fontButton)
+        # self.layout.addRow(self.textFgButton)
+        self.layout.addRow(self.textBgButton)
+        self.layout.addRow(self.saveButton)
+
+        # Set dialog layout
+        self.setLayout(self.layout)
+        self.setWindowTitle('Connection Dialog')    
+
+    # def setFont(self):
+    #     (font,ok) = QFontDialog.getFont(self.parent.inputLine.font())
+    #     if( ok ):
+    #         self.parent.fontstr = font.toString()
+    #         self.parent.inputLine.setFont(font)
+    #         self.parent.textBox.setFont(font)
+
+    # def setFg(self):
+    #     c = QColorDialog.getColor()
+    #     self.parent.textFgColor = 'rgb('+str(c.red())+','+str(c.green())+','+str(c.blue())+')'
+    #     self.parent.textBox.setStyleSheet('QTextEdit{color: '+self.parent.textFgColor+'; background: '+self.parent.textBgColor+';}');
+    #     if( 'connected' == self.parent.state ):
+    #         self.parent.inputLine.setStyleSheet('QLineEdit{color: '+self.parent.textFgColor+'; background: '+self.parent.textBgColor+';}');
+
+    def setBg(self):
+        c = QColorDialog.getColor()
+        # self.parent.textBgColor = 'rgb('+str(c.red())+','+str(c.green())+','+str(c.blue())+')'
+        # self.parent.textBox.setStyleSheet('QTextEdit{color: '+self.parent.textFgColor+'; background: '+self.parent.textBgColor+';}');
+        # if( 'connected' == self.parent.state ):
+        #     self.parent.inputLine.setStyleSheet('QLineEdit{color: '+self.parent.textFgColor+'; background: '+self.parent.textBgColor+';}');
+
+    def saveSettings(self):
+        # self.parent.insSleepAmount = float(self.insSleepAmount.text())
+        # self.parent.tsfmt = self.tsfmt.text()
+        # self.parent.font = self.font
+        self.parent.saveSettings()
+        self.accept()
+#END class OptionsDialog(QtGui.QDialog)
 
 # class HotKeyDialog(QDialog):
 #     def __init__(self, parent):

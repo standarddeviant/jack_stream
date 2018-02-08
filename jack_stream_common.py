@@ -5,13 +5,15 @@ import json
 import struct
 import logging
 
-def msgify_pkt(client, curpkt, msgtypes=('META', 'DATA'), log=logging):
+JACK_STREAM_VERSION = '0.01'
+
+def msgify_pkt(prevpkt, curpkt, msgtypes=('META', 'DATA'), log=logging):
     '''FIXME add msgify_pkt doc string'''
-    client.prevpkt += curpkt # bytearray
+    prevpkt.extend(curpkt) # bytearray
     msgtype = ''
     for mtloop in msgtypes:
         try:
-            metaidx = client.prevpkt.index(bytearray(mtloop.encode()))
+            metaidx = prevpkt.index(bytearray(mtloop.encode()))
             msgtype = mtloop
         except:
             continue
@@ -23,12 +25,12 @@ def msgify_pkt(client, curpkt, msgtypes=('META', 'DATA'), log=logging):
     # if we get here, try to grab prevpkt len, and then following data
     # if errors, just return None and wait for client.prevpkt to 'grow'
     try:
-        pktlen = struct.unpack('i', client.prevpkt[metaidx+4:metaidx+4+4])[0]
-        barr = client.prevpkt[metaidx+4+4:metaidx+4+4+pktlen]
+        pktlen = struct.unpack('i', prevpkt[metaidx+4:metaidx+4+4])[0]
+        barr = prevpkt[metaidx+4+4:metaidx+4+4+pktlen]
 
         # if we get here, return of some data should be guaranteed
         # so we can remove the msgtype, pktlen, and data from client.prevpkt
-        del(client.prevpkt[0:metaidx+4+4+pktlen])
+        del(prevpkt[0:metaidx+4+4+pktlen])
 
     except:
         log.warning('not enough data for packet, waiting for more data')

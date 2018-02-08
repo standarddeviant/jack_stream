@@ -27,7 +27,7 @@ import numpy as np
 import queue # non-standard import???
 import jack
 
-from jack_stream_common import msgify_pkt, get_ip
+from jack_stream_common import msgify_pkt, get_ip, JACK_STREAM_VERSION
 
 if sys.version_info < (3, 0):
     # In Python 2.x, event.wait() cannot be interrupted with Ctrl+C.
@@ -200,8 +200,8 @@ def handle_buffers_and_clients():
                 try:
                     client.sock.send(
                         bytearray('DATA'.encode()) +
-                        struct.pack('<i', len(jackbuf[client.channel-1])) +
-                        jackbuf[client.channel-1]) # 1-based vs. 0-based
+                        struct.pack('<i', len(jackbufs[client.channel-1])) +
+                        jackbufs[client.channel-1]) # 1-based vs. 0-based
                 except:
                     pass # FIXME with multiple exception types!
                     # tuple index out of bounds
@@ -237,12 +237,12 @@ def handle_buffers_and_clients():
 
         # check if clients sent control information on the sockets
         for client in client_list:
-            cur_pkt = client.sock.recv(1024)
-            if cur_pkt:
-                (msgtype, cur_msg) = msgify_pkt(client, cur_pkt)
-                if cur_msg and msgtype == 'META' and 'channel_select' in cur_msg:
+            curpkt = client.sock.recv(1024)
+            if curpkt:
+                (msgtype, curmsg) = msgify_pkt(client.prevpkt, curpkt)
+                if curmsg and msgtype == 'META' and 'channel_select' in curmsg:
                     # update channel
-                    client.channel = cur_msg['channel_select']
+                    client.channel = curmsg['channel_select']
 
     # end while True
 
