@@ -64,13 +64,13 @@ clientname = args.name
 servername = None
 channels = args.channels
 port = args.port
-client = jack.Client(clientname, servername=servername)
+jack_client = jack.Client(clientname, servername=servername)
 
-# check jack server status and possible client renaming
-if client.status.server_started:
+# check jack server status and possible jack_client renaming
+if jack_client.status.server_started:
     logging.info('JACK server started')
-if client.status.name_not_unique:
-    logging.warning('unique name {0!r} assigned'.format(client.name))
+if jack_client.status.name_not_unique:
+    logging.warning('unique name {0!r} assigned'.format(jack_client.name))
 
 # this is to support python2 - should we even bother?
 event = threading.Event()
@@ -125,7 +125,7 @@ class ChannelsStatsType:
 class ClientType:
     def __init__(self, sock, addr, channel=None, prevpkt=None):
         if channel == None: channel = 1
-        if pkt     == None: pkt     = bytearray()
+        if prevpkt == None: prevpkt = bytearray()
         
         # shadow inputs to class variables
         self.sock    = sock
@@ -137,10 +137,12 @@ class ClientType:
 
 # list of clients to be appended by handle_incoming_threads
 # this list will be looped over/serviced by handle_buffers_and_clients
+
+
 client_list = []
-
-
 def handle_incoming_connections():
+    global client_list
+    loopback_time = 0.0
     bind_ip = '0.0.0.0'
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -154,25 +156,29 @@ def handle_incoming_connections():
     while True:
         (client_sock, client_addr) = server.accept()
 
-        logging.info('connected client_addr is {}'.format(client_addr))
-        logging.info('client_list ='.format(
-            ''.join('\n    {}'.format(c.addr[0]) for c in client_list)))
-
-        # if we connect back to ourself, then break while loop
+        # if we connect back to ourself twice in 5 seconds, then break while loop
         if client_addr[0] in ('localhost', '127.0.0.1'):
-            client_sock.close() # close the socket just used for signalling
-            server.close() # close incoming listener socket
-            break
+            if time.time() - loopback_time < 5.0:
+                client_sock.close() # close the socket just used for signalling
+                server.close() # close incoming listener socket
+                break # we're done, pack up and go home
+            else:
+                loopback_time = time.time()
+
 
         logging.info('Accepted connection from {}:{}'.format(
             client_addr[0], client_addr[1]))
 
-        # set client to blocking
+        logging.info('client_list = {}'.format(
+            ''.join('\n    {}'.format(c.addr[0]) for c in client_list)))
+
+        # set netclient to blocking
         client_sock.setblocking(False)
 
-        # create client object for handle_buffers_and_clients
+        # create netclient object for handle_buffers_and_clients
         client_list.append(
-            ClientType(client_sock, client_addr, 1, bytearray())
+            ClientType(sock=client_sock, addr=client_addr, 
+                       channel=1, prevpkt=bytearray())
         )
 #end handle_incoming_connections
 
@@ -184,8 +190,9 @@ incoming_thread.start()
 
 gBufQ = queue.Queue()
 def handle_buffers_and_clients():
+    global jack_client
     channel_stats = ChannelsStatsType()
-    last_stats_send_time = time.time()
+    last_meta_send_time = time.time()
 
     while True:
         # pull a buffer, this is a blocking call
@@ -195,35 +202,42 @@ def handle_buffers_and_clients():
             break # end the thread
 
         # send buffers ASAP
-        for client in client_list:
-            if client.channel > 0:
+        for netclient in client_list:
+            if netclient.channel > 0:
                 try:
-                    client.sock.send(
+                    netclient.sock.send(
                         bytearray('DATA'.encode()) +
-                        struct.pack('<i', len(jackbufs[client.channel-1])) +
-                        jackbufs[client.channel-1]) # 1-based vs. 0-based
+                        struct.pack('<i', len(jackbufs[netclient.channel-1])) +
+                        jackbufs[netclient.channel-1]) # 1-based vs. 0-based
                 except:
                     pass # FIXME with multiple exception types!
                     # tuple index out of bounds
-                    # client socket issue
+                    # netclient socket issue
                     # etc...
 
         # update channel statistics with 'rms' and 'clips'
         channel_stats.update_with_bufs(jackbufs)
 
-        if time.time() - last_stats_send_time > 1.0:
-            last_stats_send_time = time.time()
-            stats_dict = channel_stats.collect_as_dict()
+        if time.time() - last_meta_send_time > 1.0:
+            last_meta_send_time = time.time()
+            meta_dict = channel_stats.collect_as_dict()
+            meta_dict['format'] = dict(
+                channe_lcount  = len(jack_client.inports),
+                samplerate    = jack_client.samplerate,
+                samplesize    = 32,
+                sampletype    = "float",
+                byteorder     = "little",
+                codec         = "audio/pcm")
 
-            logging.debug(stats_dict)
-            stats_str = json.dumps(stats_dict)
+            logging.debug(meta_dict)
+            meta_str = json.dumps(meta_dict)
             
-            for client in client_list:
+            for netclient in client_list:
                 try:
-                    client.sock.send(
+                    netclient.sock.send(
                         bytearray('META'.encode()) +
-                        struct.pack('<i', len(stats_str.encode())) +
-                        bytearray(stats_str.encode()))
+                        struct.pack('<i', len(meta_str.encode())) +
+                        bytearray(meta_str.encode()))
                 except:
                     pass # FIXME with multiple exception types!
                     # tuple index out of bounds
@@ -234,21 +248,25 @@ def handle_buffers_and_clients():
 
         # FIXME, should we yield here????
         # or set thread priorities so jack thread has higher priority...
+        time.sleep(0)
 
         # check if clients sent control information on the sockets
-        for client in client_list:
-            curpkt = client.sock.recv(1024)
-            if curpkt:
-                (msgtype, curmsg) = msgify_pkt(client.prevpkt, curpkt)
-                if curmsg and msgtype == 'META' and 'channel_select' in curmsg:
-                    # update channel
-                    client.channel = curmsg['channel_select']
+        for netclient in client_list:
+            try:
+                curpkt = netclient.sock.recv(1024)
+                if curpkt:
+                    (msgtype, curmsg) = msgify_pkt(netclient.prevpkt, curpkt)
+                    if curmsg and msgtype == 'META' and 'channel_select' in curmsg:
+                        # update channel
+                        netclient.channel = curmsg['channel_select']
+            except BlockingIOError as bioe:
+                logging.debug(str(bioe))
 
     # end while True
 
-    # close all the client sockets before ending thread
-    for client in client_list:
-        client.sock.close()
+    # close all the netclient sockets before ending thread
+    for netclient in client_list:
+        netclient.sock.close()
 # end def handle_buffers_and_clients
 
 
@@ -257,14 +275,14 @@ bufclient_thread = threading.Thread(target=handle_buffers_and_clients)
 bufclient_thread.start()
 
 
-@client.set_process_callback
+@jack_client.set_process_callback
 def jack_process(frames):
     # put tuple of channel buffers in to queue
-    gBufQ.put( (inport.get_buffer() for inport in client.inports) )
+    gBufQ.put( (inport.get_buffer() for inport in jack_client.inports) )
 # end jack_process
 
 
-@client.set_shutdown_callback
+@jack_client.set_shutdown_callback
 def jack_shutdown(status, reason):
     print('JACK shutdown!')
     print('    status:', status)
@@ -275,13 +293,16 @@ def jack_shutdown(status, reason):
 
 # create input ports
 for chidx in range(channels):
-    client.inports.register('input_{:02d}'.format(chidx))
+    jack_client.inports.register('input_{:02d}'.format(chidx))
 
 
-def clean_up_threads():
-    # signal incoming_thread AND bufclient_thread to end
+def clean_up_threads_etc():
+    # signal incoming_thread to end by connecting twice quickly
     tmpsock = socket.socket().connect(('localhost', port))
-    gBufQ.put(None) # signal buf handler thread to end
+    tmpsock = socket.socket().connect(('localhost', port))
+
+    # signal buf handler thread to end
+    gBufQ.put(None) 
 
     # wait for those threads to finish
     logging.debug('waiting for network and buffer threads to cleanly exit')
@@ -290,16 +311,16 @@ def clean_up_threads():
     logging.info('network and buffer threads cleanly exited')
 
 
-with client:
+with jack_client:
     print('\nPress Ctrl+C to stop\n')
     try:
         event.wait()
     except KeyboardInterrupt:
         logging.warning('Interrupted by user')
 
-    clean_up_threads()
+    clean_up_threads_etc()
 
 
-# When the above with-statement is left (either because the end of the
+# When the above with-statement is left (either because the end of the# signal buf handler thread to end
 # code block is reached, or because an exception was raised inside),
-# client.deactivate() and client.close() are called automatically.
+# jack_client.deactivate() and jack_client.close() are called automatically.

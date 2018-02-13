@@ -10,6 +10,7 @@ last edited: February 2018
 
 import os, sys, json, time, logging
 from os.path import join, expanduser
+# from operator import map
 
 try: # python 3 std imports
     import configparser
@@ -24,20 +25,22 @@ try:
     from PyQt5.QtWidgets import *
     #    QMainWindow, QDialog, QLineEdit, QFormLayout, QApplication
     from PyQt5.QtCore import pyqtSlot as PyQtSlot, pyqtSignal as PyQtSignal
+    from PyQt5.QtCore import QByteArray, QIODevice
+    from PyQt5.QtMultimedia import QAudioDeviceInfo, QAudioFormat, QAudioOutput
     # from PyQt5.QtCore import QObject, pyqtSlot
     # from PyQt5.QtCore import pyqtSignal as QtSignal
 except:
-    try:
-        from PyQt4 import QtCore,QtGui,QtNetwork
-        from PyQt4.QtGui import *
-        #    QMainWindow, QDialog, QLineEdit, QFormLayout, QApplication
-        from PyQt4.QtCore import pyqtSlot as PyQtSlot, pyqtSignal as PyQtSignal
-    except:
-        pass # fixme, try to use PySide and THEN print helpful error message...
+    logging.error('Unable to import PyQt5')
+    sys.exit()
 
 
 from jack_stream_common import msgify_pkt, JACK_STREAM_VERSION
 
+class ChannelWidgetType:
+    def __init__(self, button, rms, clips):
+        self.button = button
+        self.rms    = rms
+        self.clips  = clips
 
 class JackStreamListen(QMainWindow):
     checkInQueueSignal = PyQtSignal()
@@ -61,10 +64,15 @@ class JackStreamListen(QMainWindow):
         self.qsock = QtNetwork.QTcpSocket(self)
         self.qsock.readyRead.connect(self.onReadyRead)
         
+        # create None/empty variables to be created/updated later
         self.prevpkt = bytearray() # note a QByteArray b/c reusing msgify_pkt
         self.audiodata = bytearray()
         self.clips = []
-        
+        self.rms = []
+        self.audiofmt = QAudioFormat()
+        self.audioout = QAudioOutput()
+        self.iodevice = self.createIoDevice()
+
         #FIXME self.tcpSocket.error.connect(self.displayError)
 
         # self.font = QtGui.QFont()
@@ -80,44 +88,42 @@ class JackStreamListen(QMainWindow):
         self.statusLabel.setStyleSheet('QLabel {color: white; background: red}')
 
         # create layout/widgets for channels stats to be updated later
-        self.channelsLayout = QGridLayout()
-        self.channelsWidgets = []
-        self.channelsContainer = QWidget()
-        self.setCentralWidget(self.channelsContainer)
+        self.setCentralWidget(QLabel('Waiting for connection and channels metadata'))
 
         self.connectAction = QAction('Connect', self);self.connectAction.setShortcut('Ctrl+X')
         self.connectAction.triggered.connect(self.invokeConnectDialog);
         self.disconnectAction = QAction('Disonnect', self);self.disconnectAction.setShortcut('Ctrl+D')
         self.disconnectAction.triggered.connect(self.disconnect);self.disconnectAction.setEnabled(0)
-        # self.insertAction = QAction('Insert File', self);self.insertAction.setShortcut('Ctrl+I')
-        # self.insertAction.triggered.connect(self.insertFile);self.insertAction.setEnabled(0)
         self.exitAction = QAction('Exit', self);self.exitAction.setShortcut('Ctrl+Q')
         self.exitAction.triggered.connect(self.exitApplication)
         self.optionsAction = QAction('Options', self);self.optionsAction.setShortcut('Ctrl+O')
         self.optionsAction.triggered.connect(self.invokeOptionsDialog)
 
-        #menubar = self.menuBar()
-        #fileMenu = menubar.addMenu('&File')
-        #fileMenu.addAction(exitAction)
+        # Create main toolbar
         mainbar = QToolBar('Main');mainbar.setParent(self)
         self.addToolBar(QtCore.Qt.TopToolBarArea,mainbar)
         mainbar.setMovable(0)
         mainbar.addAction(self.connectAction)
         mainbar.addAction(self.disconnectAction)
-        # mainbar.addAction(self.insertAction)
         mainbar.addAction(self.optionsAction)
 
         #adding to window so the key shortcut works, but it's not displayed in the menu
         self.addAction(self.exitAction)
 
-        inputbar = QToolBar('Input');inputbar.setParent(self)
+        inputbar=QToolBar('Input'); inputbar.setParent(self)
         self.addToolBar(QtCore.Qt.BottomToolBarArea,inputbar)
         inputbar.setMovable(0)
         inputbar.addWidget(self.statusLabel)
 
+        # create empty list to be used/referenced after we've connected to the host
+        self.channelsWidgets = [] 
+
         self.setGeometry(300, 300, 350, 250)
         self.setWindowTitle('jack_stream_listen v'+JACK_STREAM_VERSION)    
         self.show()
+
+    def createIoDevice(self):
+        pass
 
     def invokeConnectDialog(self):
         if( self.state == 'disconnected' ):
@@ -138,7 +144,6 @@ class JackStreamListen(QMainWindow):
         self.disconnectAction.setEnabled(1)
         self.statusLabel.setText('STATUS: Connected')
         self.statusLabel.setStyleSheet('QLabel {color: white; background: green}')
-
 
     def disconnect(self):
         if( self.state == 'connected' ):
@@ -208,21 +213,57 @@ class JackStreamListen(QMainWindow):
         msgtype, msg = msgify_pkt(self.prevpkt, curpkt)
 
         if msgtype == 'META' and len(msg) > 0:
-            jsd = json.loads(msg)
-            self.updateChannelsStats(jsd)
+            self.updateMetadata(msg)
 
-    def updateChannelsStats(self, jsd):
-        if 'rms' in jsd and 'clips' in jsd:
-            assert len(jsd['rms']) == len(jsd['clips'])
-            if
+    def updateMetadata(self, msg):            
+        if self.channel_count < 0:
+            try:
+                self.channel_count = msg['format']['channel_count']
+                self.createChannelsWidget()
+            except:
+                logging.warning('Unable to set channel count from META msg')
+                logging.warning(json.dumps(msg, indent=4))
             
-        self.channelsWidgets.append
-        self.channelsLayout = QGridLayout()
+            self.rms = [0.0, ] * self.channel_count
+            self.clips = [0, ] * self.channel_count
+            self.createChannelsWidgets()
 
+        if 'rms' in msg and 'clips' in msg:
+            assert len(msg['rms']) == len(msg['clips']) == self.channel_count
+            self.rms = msg['rms']
+            self.clips = list(map(add, self.clips, msg['clips']))
+            
+            for cidx,cw in enumerate(self.channelsWidgets):
+                cw.rms.setText('{:3f}'.format(msg['rms'][cidx]))
+
+
+
+            
+
+    def createChannelsWidgets(self):
         self.channelsContainer = QWidget()
-        self.setCentralWidget(self.channelsContainer)
+        self.channelsLayout = QGridLayout()
+        self.channelsContainer.setLayout( self.channelsLayout )
 
-        pass
+        self.channelsWidgets = [
+            ChannelWidgetType(
+                QPushButton(str(idx), self),
+                QLabel(self),
+                QLabel(self)
+            )
+            for idx in range(self.channel_count)
+        ]
+
+        self.channelsButtonGroup = QButtonGroup(self)
+        for cidx,cw in enumerate(self.channelsWidgets):
+            self.channelsButtonGroup.addButton(cw.button)
+            self.channelsContainer.addWidget(cw.button, 0, cidx)
+            self.channelsContainer.addWidget(cw.rms,    1, cidx)
+            self.channelsContainer.addWidget(cw.clips,  2, cidx)
+
+        self.setCentralWidget(self.channelsContainer)
+    # end createChannelsWidgets
+
 
     #Redefining QtGui.MainWindow method in order to cleanly destroy socket 
     #connection when the user clicks the 'X' button at the top of the window
@@ -231,6 +272,35 @@ class JackStreamListen(QMainWindow):
         event.accept()
 #END Qnet class
 
+class BufferQueueIO(QIODevice):
+    def __init__(self, bufQ, parent):
+        super(BufferQueueIO, self).__init__(parent)
+        self.buffer = QByteArray()
+        self.bufQ = bufQ
+
+    def start(self):
+        self.open(QIODevice.ReadOnly)
+
+    def stop(self):
+        self.m_pos = 0
+        self.close()
+
+    def readData(self, maxlen):
+        if self.bufQ.qsize() >= 2:
+            self.buffer.append(self.bufQ.get())
+
+        if self.buffer.length() < maxlen:
+            return QByteArray(bytearray((0,)*10)).data() # FIXME, return QByteArray of zeros
+        else:
+            outp = self.buffer.mid(0, maxlen).data()
+            self.buffer.remove(0, maxlen)
+            return outp
+
+    def writeData(self, data):
+        return 0
+
+    def bytesAvailable(self):
+        return self.m_buffer.size() + super(BufferQueueIO, self).bytesAvailable()
 
 class ConnectDialog(QDialog):
     def __init__(self, parent):
