@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 
-"""Create a JACK client that serves audio to jack_stream_listen.
-
-This is somewhat modeled after the "thru_client.c" example of JACK 2:
-http://github.com/jackaudio/jack2/blob/master/example-clients/thru_client.c
-
-If you have a microphone and loudspeakers connected, this might cause an
-acoustical feedback!
-
 """
+Create a JACK client that serves audio to jack_stream_listen.
+"""
+
 # standard imports
 # import os
 import sys
@@ -222,7 +217,7 @@ def handle_buffers_and_clients():
             last_meta_send_time = time.time()
             meta_dict = channel_stats.collect_as_dict()
             meta_dict['format'] = dict(
-                channe_lcount  = len(jack_client.inports),
+                channel_count = len(jack_client.inports),
                 samplerate    = jack_client.samplerate,
                 samplesize    = 32,
                 sampletype    = "float",

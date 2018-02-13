@@ -10,7 +10,7 @@ last edited: February 2018
 
 import os, sys, json, time, logging
 from os.path import join, expanduser
-# from operator import map
+from operator import add
 
 try: # python 3 std imports
     import configparser
@@ -209,13 +209,12 @@ class JackStreamListen(QMainWindow):
     def onReadyRead(self):
         # tstr = time.strftime(self.tsfmt)
         curpkt = bytearray(self.qsock.readAll())
-        logging.debug('DBG: Rcvd: '+curpkt.decode())
         msgtype, msg = msgify_pkt(self.prevpkt, curpkt)
 
         if msgtype == 'META' and len(msg) > 0:
             self.updateMetadata(msg)
 
-    def updateMetadata(self, msg):            
+    def updateMetadata(self, msg):
         if self.channel_count < 0:
             try:
                 self.channel_count = msg['format']['channel_count']
@@ -228,6 +227,7 @@ class JackStreamListen(QMainWindow):
             self.clips = [0, ] * self.channel_count
             self.createChannelsWidgets()
 
+
         if 'rms' in msg and 'clips' in msg:
             assert len(msg['rms']) == len(msg['clips']) == self.channel_count
             self.rms = msg['rms']
@@ -236,9 +236,6 @@ class JackStreamListen(QMainWindow):
             for cidx,cw in enumerate(self.channelsWidgets):
                 cw.rms.setText('{:3f}'.format(msg['rms'][cidx]))
 
-
-
-            
 
     def createChannelsWidgets(self):
         self.channelsContainer = QWidget()
@@ -257,9 +254,9 @@ class JackStreamListen(QMainWindow):
         self.channelsButtonGroup = QButtonGroup(self)
         for cidx,cw in enumerate(self.channelsWidgets):
             self.channelsButtonGroup.addButton(cw.button)
-            self.channelsContainer.addWidget(cw.button, 0, cidx)
-            self.channelsContainer.addWidget(cw.rms,    1, cidx)
-            self.channelsContainer.addWidget(cw.clips,  2, cidx)
+            self.channelsLayout.addWidget(cw.button, 0, cidx)
+            self.channelsLayout.addWidget(cw.rms,    1, cidx)
+            self.channelsLayout.addWidget(cw.clips,  2, cidx)
 
         self.setCentralWidget(self.channelsContainer)
     # end createChannelsWidgets
