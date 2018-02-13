@@ -157,15 +157,15 @@ class JackStreamListen(QMainWindow):
             self.statusLabel.setStyleSheet('QLabel {color: white; background: red}')
 
             self.channel_count = -1
-            self.channel_select = -1
+            # self.channel_select = -1
 
 
-    @PyQtSlot()
-    def sendMetaToTcp(self):
+    @PyQtSlot(int)
+    def sendMetaToServer(self, cidx):
+        metastr = json.dumps(dict(channel_select=cidx))
         if( self.state == 'connected' ):
-            outstr = self.inputLine.text()+'\r\n'
-            dbg = self.qsock.write(QtCore.QByteArray(outstr))
-            self.inputLine.clear()
+            print('cidx = {}'.format(cidx))
+            dbg = self.qsock.write(QByteArray(bytearray(metastr.encode())))
 
     def exitApplication(self):
         if( self.state == 'connected' ):
@@ -177,13 +177,10 @@ class JackStreamListen(QMainWindow):
     def saveSettings(self):
         cfgParser = configparser.RawConfigParser()
         cfgParser.add_section('Generic')
-        cfgParser.set('Generic','ip', self.ip)
-        cfgParser.set('Generic','port', self.port)
-        # cfgParser.set('Generic','tsfmt',self.tsfmt)
-        # cfgParser.set('Generic','font',self.fontstr)
-        # cfgParser.set('Generic','textfg',self.textFgColor)
-        # cfgParser.set('Generic','textbg',self.textBgColor)
-
+        cfgParser.set('Generic', 'ip', self.ip)
+        cfgParser.set('Generic', 'port', self.port)
+        cfgParser.set('Generic', 'channel_select', self.channel_select)
+        
         with open(join(expanduser('~'), 'jack_stream_listen.cfg'), 'w') as cfgfile:
             cfgParser.write(cfgfile)
 
@@ -193,17 +190,6 @@ class JackStreamListen(QMainWindow):
         if( cfgParser.has_section('Generic') ):
             self.ip = cfgParser.get('Generic','ip')
             self.port = cfgParser.get('Generic','port')
-            # self.tsfmt = cfgParser.get('Generic','tsfmt')
-            # self.fontstr = cfgParser.get('Generic','font')
-            # self.font = QtGui.QFont()
-            # self.font.fromString(self.fontstr)
-            # self.textFgColor = cfgParser.get('Generic','textfg')
-            # self.textBgColor = cfgParser.get('Generic','textbg')
-
-        # if( cfgParser.has_section('InsertFile') ):
-        #     self.insFile = cfgParser.get('InsertFile','insFile')
-        #     self.insDir = cfgParser.get('InsertFile','insDir')
-        #     self.insSleepAmount = cfgParser.get('InsertFile','insSleepAmount')
 
     @PyQtSlot()
     def onReadyRead(self):
@@ -213,29 +199,6 @@ class JackStreamListen(QMainWindow):
 
         if msgtype == 'META' and len(msg) > 0:
             self.updateMetadata(msg)
-
-    def updateMetadata(self, msg):
-        if self.channel_count < 0:
-            try:
-                self.channel_count = msg['format']['channel_count']
-                self.createChannelsWidget()
-            except:
-                logging.warning('Unable to set channel count from META msg')
-                logging.warning(json.dumps(msg, indent=4))
-            
-            self.rms = [0.0, ] * self.channel_count
-            self.clips = [0, ] * self.channel_count
-            self.createChannelsWidgets()
-
-
-        if 'rms' in msg and 'clips' in msg:
-            assert len(msg['rms']) == len(msg['clips']) == self.channel_count
-            self.rms = msg['rms']
-            self.clips = list(map(add, self.clips, msg['clips']))
-            
-            for cidx,cw in enumerate(self.channelsWidgets):
-                cw.rms.setText('{:3f}'.format(msg['rms'][cidx]))
-
 
     def createChannelsWidgets(self):
         self.channelsContainer = QWidget()
@@ -253,14 +216,39 @@ class JackStreamListen(QMainWindow):
 
         self.channelsButtonGroup = QButtonGroup(self)
         for cidx,cw in enumerate(self.channelsWidgets):
-            self.channelsButtonGroup.addButton(cw.button)
+            self.channelsButtonGroup.addButton(cw.button, cidx)
             self.channelsLayout.addWidget(cw.button, 0, cidx)
             self.channelsLayout.addWidget(cw.rms,    1, cidx)
             self.channelsLayout.addWidget(cw.clips,  2, cidx)
 
+            self.channelsButtonGroup.buttonClicked[int].connect(self.sendMetaToServer)
+
+
         self.setCentralWidget(self.channelsContainer)
     # end createChannelsWidgets
 
+    def updateMetadata(self, msg):
+        if self.channel_count < 0:
+            try:
+                self.channel_count = msg['format']['channel_count']
+                self.createChannelsWidgets()
+            except Exception as e:
+                print(str(e))
+                logging.warning('Unable to set channel count from META msg')
+                logging.warning(json.dumps(msg, indent=4))
+            
+            self.rms = [0.0, ] * self.channel_count
+            self.clips = [0, ] * self.channel_count
+            self.createChannelsWidgets()
+
+
+        if 'rms' in msg and 'clips' in msg:
+            assert len(msg['rms']) == len(msg['clips']) == self.channel_count
+            self.rms = msg['rms']
+            self.clips = list(map(add, self.clips, msg['clips']))
+            
+            for cidx,cw in enumerate(self.channelsWidgets):
+                cw.rms.setText('{:3f}'.format(msg['rms'][cidx]))
 
     #Redefining QtGui.MainWindow method in order to cleanly destroy socket 
     #connection when the user clicks the 'X' button at the top of the window
@@ -287,7 +275,8 @@ class BufferQueueIO(QIODevice):
             self.buffer.append(self.bufQ.get())
 
         if self.buffer.length() < maxlen:
-            return QByteArray(bytearray((0,)*10)).data() # FIXME, return QByteArray of zeros
+             # FIXME, return correct length QByteArray of zeros
+            return QByteArray(bytearray((0,)*10)).data()
         else:
             outp = self.buffer.mid(0, maxlen).data()
             self.buffer.remove(0, maxlen)
