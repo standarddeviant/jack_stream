@@ -142,8 +142,8 @@ class JackStreamListen(QMainWindow):
 
         self.connectAction.setEnabled(0)
         self.disconnectAction.setEnabled(1)
-        self.statusLabel.setText('STATUS: Connected')
-        self.statusLabel.setStyleSheet('QLabel {color: white; background: green}')
+        self.statusLabel.setText('STATUS: Connected, waiting for Initialization')
+        self.statusLabel.setStyleSheet('QLabel {color: black; background: yellow}')
 
     def disconnect(self):
         if( self.state == 'connected' ):
@@ -232,6 +232,9 @@ class JackStreamListen(QMainWindow):
             try:
                 self.channel_count = msg['format']['channel_count']
                 self.createChannelsWidgets()
+                self.statusLabel.setText('STATUS: Connected AND Initialized')
+                self.statusLabel.setStyleSheet('QLabel {color: black; background: green}')
+
             except Exception as e:
                 print(str(e))
                 logging.warning('Unable to set channel count from META msg')

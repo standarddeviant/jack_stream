@@ -9,12 +9,17 @@ Create a JACK client that serves audio to jack_stream_listen.
 import sys
 import json
 import time
+import uuid
+import janus
+import queue
 import signal
 import struct
 import socket
+import asyncio
 import logging
 import argparse
 import threading
+import websockets
 # import collections
 
 import numpy as np
@@ -22,7 +27,7 @@ import numpy as np
 import queue # non-standard import???
 import jack
 
-from jack_stream_common import msgify_pkt, get_ip, JACK_STREAM_VERSION
+from jack_stream_common import get_ip, JACK_STREAM_VERSION
 
 if sys.version_info < (3, 0):
     # In Python 2.x, event.wait() cannot be interrupted with Ctrl+C.
@@ -77,6 +82,23 @@ def calcrms(x):
 def countclips(x):
     return np.sum(abs(x) > 1.0)
 
+async def ws_recv_json_dict(ws):
+    jss = await ws.recv()
+    try:
+        jsd = json.loads(jss)
+    except json.JSONDecodeError as de:
+        logging.warning(str(de))
+        return jss # binary?
+    return jsd
+
+async def ws_send_json_fields(ws, **kwargs):
+    try:
+        await ws.send(json.dumps(kwargs))
+        return False
+    except:
+        return True
+
+
 class ChannelsStatsType:
     def __init__(self, rms=None, clips=None):
         if list != type(rms): rms=list()
@@ -103,8 +125,8 @@ class ChannelsStatsType:
 
         if len(self.rms) <= 0 or len(self.clips) <= 0:
             outp = dict(
-                rms  =(nan,)*channels,
-                clips=(nan,)*channels
+                rms  =(np.nan,)*channels,
+                clips=(np,)*channels
             )
         else:
             outp = dict(
@@ -118,15 +140,17 @@ class ChannelsStatsType:
 
 
 class ClientType:
-    def __init__(self, sock, addr, channel=None, prevpkt=None):
-        if channel == None: channel = 1
-        if prevpkt == None: prevpkt = bytearray()
+    def __init__(self, wsock, wsaddr, id=None, channel=None, connected=None):
+        if id        == None: id = str(uuid.uuid1())
+        if channel   == None: channel = 1
+        if connected == None: connected = False
         
         # shadow inputs to class variables
-        self.sock    = sock
-        self.addr    = addr
-        self.channel = channel
-        self.prevpkt = prevpkt
+        self.wsock     = wsock
+        self.wsaddr    = wsaddr
+        self.id        = id
+        self.channel   = channel
+        self.connected = connected
 # end ClientsType
 
 
@@ -134,87 +158,67 @@ class ClientType:
 # this list will be looped over/serviced by handle_buffers_and_clients
 
 
-client_list = []
-def handle_incoming_connections():
-    global client_list
-    loopback_time = 0.0
-    bind_ip = '0.0.0.0'
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+g_client_d = dict()
+g_loopback_time = 0.0
+async def handle_wsock_coro(wsock, wsuri):
+    global g_client_d, g_loopback_time
+    logging.debug('path = {}'.format(wsuri))
 
-    server.bind((bind_ip, port))
-    server.listen()
+    # # check for 'back-to-back' connections from the localhost or 127.0.0.1 
+    # if any(map(lambda ip: ip in wsuri, ('127.0.0.1', 'localhost'))):
+    #     if time.time() - loopback_time < 5.0:
+    #         pass # close things???
+    #     else:
+    #         loopback_time = time.time()
 
-    print('\nWaiting for connections on {} : {}'.format(
-        get_ip(), port))
-
+    # wait for 'connect' message
     while True:
-        (client_sock, client_addr) = server.accept()
+        connect = await ws_recv_json_dict(wsock)
+        if 'message' in connect and 'connect' == connect['message']:
+            client = ClientType(wsock, wsuri, connected=True)
+            g_client_d[client.id] = client
+            await ws_send_json_fields(client.wsock, 
+                    message        = 'connected', 
+                    id             = client.id,
+                    channel_select = client.channel)
+            break
 
-        # if we connect back to ourself twice in 5 seconds, then break while loop
-        if client_addr[0] in ('localhost', '127.0.0.1'):
-            if time.time() - loopback_time < 5.0:
-                client_sock.close() # close the socket just used for signalling
-                server.close() # close incoming listener socket
-                break # we're done, pack up and go home
-            else:
-                loopback_time = time.time()
-
-
-        logging.info('Accepted connection from {}:{}'.format(
-            client_addr[0], client_addr[1]))
-
-        logging.info('client_list = {}'.format(
-            ''.join('\n    {}'.format(c.addr[0]) for c in client_list)))
-
-        # set netclient to blocking
-        client_sock.setblocking(False)
-
-        # create netclient object for handle_buffers_and_clients
-        client_list.append(
-            ClientType(sock=client_sock, addr=client_addr, 
-                       channel=1, prevpkt=bytearray())
-        )
-#end handle_incoming_connections
+    # after 'connect', wait for messages of the types...
+    # ('channel_select', )
+    while True:
+        msg = await ws_recv_json_dict(wsock)
+        assert 'message' in msg
+        if msg['message'] in ('channel_select',):
+            try:
+                g_client_d[client.id].channel = int(msg['channel_select'])
+            except Exception as e:
+                print(str(e))
+# end async def handle_incoming
 
 
-# start thread for handle_incoming_connections
-incoming_thread = threading.Thread(target=handle_incoming_connections)
-incoming_thread.start()
-
-
-gBufQ = queue.Queue()
-def handle_buffers_and_clients():
-    global jack_client
+async def sendbufs_wsock_coro(bufQ, clientD):
     channel_stats = ChannelsStatsType()
     last_meta_send_time = time.time()
 
     while True:
-        # pull a buffer, this is a blocking call
-        jackbufs = gBufQ.get()
+        jackbufs = await bufQ.get()
 
         if jackbufs is None:
             break # end the thread
 
         # send buffers ASAP
-        for netclient in client_list:
-            if netclient.channel > 0:
-                try:
-                    netclient.sock.send(
-                        bytearray('DATA'.encode()) +
-                        struct.pack('<i', len(jackbufs[netclient.channel-1])) +
-                        jackbufs[netclient.channel-1]) # 1-based vs. 0-based
-                except:
-                    pass # FIXME with multiple exception types!
-                    # tuple index out of bounds
-                    # netclient socket issue
-                    # etc...
+        for client in clientD.values():
+            if 1 <= client.channel and client.channel <= len(jackbufs):
+                # channel-1 --> convert 1-based TO 0-based
+                await client.wsock.send(jackbufs[client.channel-1])
+                # FIXME, add exceptions to this in try/except ?
 
         # update channel statistics with 'rms' and 'clips'
         channel_stats.update_with_bufs(jackbufs)
 
         if time.time() - last_meta_send_time > 1.0:
             last_meta_send_time = time.time()
+
             meta_dict = channel_stats.collect_as_dict()
             meta_dict['format'] = dict(
                 channel_count = len(jack_client.inports),
@@ -224,56 +228,45 @@ def handle_buffers_and_clients():
                 byteorder     = "little",
                 codec         = "audio/pcm")
 
-            logging.debug(meta_dict)
-            meta_str = json.dumps(meta_dict)
-            
-            for netclient in client_list:
-                try:
-                    netclient.sock.send(
-                        bytearray('META'.encode()) +
-                        struct.pack('<i', len(meta_str.encode())) +
-                        bytearray(meta_str.encode()))
-                except:
-                    pass # FIXME with multiple exception types!
-                    # tuple index out of bounds
-                    # client socket issue
-                    # etc...
+            for client in clientD.values():
+                await ws_send_json_fields(client.wsock, **meta_dict)
+                # FIXME with multiple exception types!
         # end stats / meta check
-
-
-        # FIXME, should we yield here????
-        # or set thread priorities so jack thread has higher priority...
-        time.sleep(0)
-
-        # check if clients sent control information on the sockets
-        for netclient in client_list:
-            try:
-                curpkt = netclient.sock.recv(1024)
-                if curpkt:
-                    (msgtype, curmsg) = msgify_pkt(netclient.prevpkt, curpkt)
-                    if curmsg and msgtype == 'META' and 'channel_select' in curmsg:
-                        # update channel
-                        netclient.channel = curmsg['channel_select']
-            except BlockingIOError as bioe:
-                logging.debug(str(bioe))
-
     # end while True
 
     # close all the netclient sockets before ending thread
-    for netclient in client_list:
-        netclient.sock.close()
-# end def handle_buffers_and_clients
+    for client in clientD.values():
+        client.wsock.close()
+# end async def sendbufs
 
 
-# end handle_buffers_and_clients
-bufclient_thread = threading.Thread(target=handle_buffers_and_clients)
-bufclient_thread.start()
+g_wsock_loop = None
+def wsock_thread_func(asyncBufQ, clientD):
+    global g_wsock_loop
+    # create coroutine OBJECT for incoming connections and sending data
+    ws_handle_incoming = websockets.serve(handle_wsock_coro, 'localhost', port=args.port)
 
+    # create websocket event loop
+    g_wsock_loop = asyncio.get_event_loop()
+
+    # 'put' ws_handle_incoming AND sendbufs_coro() on g_wsock_loop
+    asyncio.ensure_future(ws_handle_incoming, loop=g_wsock_loop)
+    asyncio.ensure_future(sendbufs_wsock_coro(asyncBufQ, clientD), loop=g_wsock_loop)
+
+    # go!
+    g_wsock_loop.run_()
+# end def wsock_thread_func
+
+# create global buffer queue, spin up 
+g_buf_q = janus.Queue() # mixed mode queue, async AND sync methods
+g_wsock_thread = threading.Thread( 
+    target=wsock_thread_func, args=(g_buf_q.async_q, g_client_d))
+g_wsock_thread.start()
 
 @jack_client.set_process_callback
 def jack_process(frames):
     # put tuple of channel buffers in to queue
-    gBufQ.put( (inport.get_buffer() for inport in jack_client.inports) )
+    g_buf_q.sync_q.put( (inport.get_buffer() for inport in jack_client.inports) )
 # end jack_process
 
 
@@ -292,18 +285,20 @@ for chidx in range(channels):
 
 
 def clean_up_threads_etc():
-    # signal incoming_thread to end by connecting twice quickly
-    tmpsock = socket.socket().connect(('localhost', port))
-    tmpsock = socket.socket().connect(('localhost', port))
+    # global g_wsock_loop
+    # global g_wsock_thread
 
-    # signal buf handler thread to end
-    gBufQ.put(None) 
+    # I think this is enough to stop g_wsock_loop and g_wsock_thread...
+    g_wsock_loop.call_soon_threadsafe( g_wsock_loop.stop )
 
     # wait for those threads to finish
-    logging.debug('waiting for network and buffer threads to cleanly exit')
-    incoming_thread.join()
-    bufclient_thread.join()
-    logging.info('network and buffer threads cleanly exited')
+    logging.debug('waiting for network/buffer g_wsock_thread to cleanly exit')
+    g_wsock_thread.join()
+
+    # incoming_thread.join()
+    # bufclient_thread.join()
+    logging.info('network/buffer g_wsock_thread has cleanly exited')
+# end def clean_up_threads_etc()
 
 
 with jack_client:
